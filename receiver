@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -e
+
+REPOSITORY="$1"
+
+if [ "$REPOSITORY" == "" ] ; then
+  echo "Something is wrong. Your Repository name is blank!"
+  exit 1
+fi
+
+if [ -f "/etc/default/enneahost" ] ; then
+  . /etc/default/enneahost
+fi
+
+: ${SRC_DIR:="/home/git/src"}
+: ${DOCKER_NAMESPACE:="registry.service.consul:5000"}
+
+: ${CONSUL_IP:="consul.service.consul"}
+: ${CONSUL_PORT:="8500"}
+: ${CONSUL_URL:="http://${CONSUL_IP}:${CONSUL_PORT}/v1/kv"}
+: ${CONSUL_IMAGES_URL:="http://${CONSUL_IP}:${CONSUL_PORT}/v1/kv/enneahost/images"}
+
+: ${REPO_PATH:="$SRC_DIR/$REPOSITORY"}
+: ${DOCKERFILE:="$REPO_PATH/Dockerfile"}
+
+if [ -d "$REPO_PATH" ]; then rm -rf "$REPO_PATH"; fi
+mkdir -p "$REPO_PATH" && cat | tar -x -C "$REPO_PATH"
+BASE=`basename $REPOSITORY .git`
+
+if ! [ -e "$DOCKERFILE" ]; then
+  echo "There is no Dockerfile present."
+  exit
+fi
+
+echo docker build $REPO_PATH
+docker build -t "${DOCKER_NAMESPACE}/${BASE}" $REPO_PATH
+IMAGE_ID=$(docker images -q "${DOCKER_NAMESPACE}/${BASE}" | head -n 1)
+echo IMAGE_ID ${IMAGE_ID}
+
+echo docker tag ${IMAGE_ID} "${DOCKER_NAMESPACE}/${BASE}:${IMAGE_ID}"
+docker tag ${IMAGE_ID} "${DOCKER_NAMESPACE}/${BASE}:${IMAGE_ID}"
+
+echo docker push "${DOCKER_NAMESPACE}/${BASE}:${IMAGE_ID}"
+docker push "${DOCKER_NAMESPACE}/${BASE}:${IMAGE_ID}"
+
+declare -A -g env
+
+# read the ENV from the docker image into env
+while read var ; do
+    IFS='=' read -a env_split <<< "${var}"
+    combined="$(printf "=%s" "${env_split[@]:1}")"
+    combined="${combined:1}"
+    env[${env_split[0]}]="${combined}"
+done < <(docker inspect ${IMAGE_ID} | jq -r ".[0].Config.Env | .[]")
+
+JSON=$(jq -n --arg run_options "${env[DOCKER_RUN_OPTIONS]}" --arg run_cmd "${env[DOCKER_RUN_CMD]}" --arg namespace "${DOCKER_NAMESPACE}" --arg tag "${IMAGE_ID}" '{ "run_options": $run_options, "run_cmd": $run_cmd, "namespace": $namespace, "tag": $tag }')
+echo "$JSON" | jq "."
+curl -s -X PUT -d "${JSON}" "${CONSUL_IMAGES_URL}/${BASE}" > /dev/null
